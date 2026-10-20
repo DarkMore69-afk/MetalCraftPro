@@ -1,0 +1,25 @@
+# Xcode build products
+DerivedData/
+build/
+*.xcarchive
+*.ipa
+*.dSYM
+*.dSYM.zip
+
+# Xcode user-specific state
+*.xcuserstate
+xcuserdata/
+
+# macOS
+.DS_Store
+
+# Signing material and local secrets
+*.p12
+*.mobileprovision
+.env
+.env.*
+Secrets.swift
+ENCRYPTED_KEYS.plist
+
+# Tool-specific private project metadata
+.milq_meta/
