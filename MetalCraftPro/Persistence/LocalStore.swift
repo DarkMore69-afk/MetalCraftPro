@@ -33,10 +33,17 @@ final class LocalStore {
             do {
                 let fm = FileManager.default
                 let interrupted = fm.fileExists(atPath: config.url.appendingPathExtension("recovery-pending").path)
-                let missingWithBackup = !fm.fileExists(atPath: config.url.path)
-                    && SQLiteSnapshot.locations(store: config.url).contains { fm.fileExists(atPath: $0.path) }
-                if interrupted || missingWithBackup { throw StoreError.unavailable }
+                let storeExists = fm.fileExists(atPath: config.url.path)
+                let hasBackup = SQLiteSnapshot.locations(store: config.url)
+                    .contains { fm.fileExists(atPath: $0.path) }
+                // A stale marker means a previous snapshot was interrupted, not that
+                // the primary store is unreadable. Prefer opening the existing store;
+                // force recovery only when the store itself is missing.
+                if !storeExists && (interrupted || hasBackup) { throw StoreError.unavailable }
                 opened = try ModelContainer(for: schema, configurations: [config])
+                if interrupted {
+                    notice = "Die Datenbank wurde geöffnet. Die unterbrochene Sicherung wird erneuert."
+                }
             } catch {
                 opened = try recover(schema: schema, config: config)
                 notice = "Aus einer intakten lokalen Sicherung wiederhergestellt. Bitte prüfe den Projektstand."
