@@ -339,8 +339,7 @@ private struct SceneHost: View {
 
     var body: some View {
         let stamp = session.sceneStamp
-        return ThreeDSceneView(session: session)
-            .onAppear { _ = stamp }
+        return ThreeDSceneView(session: session, stamp: stamp)
     }
 }
 
@@ -348,6 +347,7 @@ private struct SceneHost: View {
 
 private struct ThreeDSceneView: UIViewRepresentable {
     @MainActor let session: ThreeDSession
+    let stamp: Int
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView()
@@ -366,7 +366,7 @@ private struct ThreeDSceneView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: SCNView, context: Context) {
-        context.coordinator.sync(view: view)
+        context.coordinator.sync(view: view, stamp: stamp)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session) }
@@ -436,8 +436,9 @@ final class Coordinator {
 
     init(session: ThreeDSession) { self.session = session }
 
-    func sync(view: SCNView) {
-        guard let scene = view.scene else { return }
+    func sync(view: SCNView, stamp: Int) {
+        guard stamp != lastStamp, let scene = view.scene else { return }
+        lastStamp = stamp
         if builtRevision != session.modelRevision {
             rebuildContent(in: scene)
             builtRevision = session.modelRevision
