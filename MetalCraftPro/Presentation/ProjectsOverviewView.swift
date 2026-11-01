@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import PhotosUI
 
 struct ProjectsOverviewView: View {
     @Environment(LocalStore.self) private var store
@@ -155,41 +156,139 @@ struct ProjectCard: View {
 struct NewProjectSheet: View {
     @Environment(LocalStore.self) private var store
     @Environment(\.dismiss) private var dismiss
-    @State private var name = ""
-    @State private var number = ""
-    @State private var description = ""
-    @State private var frame = true
+    @State private var showCamera = false
+    @State private var photoItem: PhotosPickerItem?
+    @State private var pendingPayload: SketchScanPayload?
+    @State private var createdProject: MCProject?
+    @State private var showReview = false
+    @State private var showProject = false
+    @State private var didAdoptSketch = false
+    @State private var isCreating = false
     @State private var problem: String?
+
     var body: some View {
         NavigationStack {
-            Form {
-                Section("Projekt") {
-                    TextField("Name", text: $name).accessibilityIdentifier("projectName")
-                    TextField("Projektnummer (automatisch)", text: $number)
-                    TextField("Beschreibung", text: $description, axis: .vertical).lineLimit(3...6)
-                }
-                Section {
-                    Toggle("Parametrischer Rahmen", isOn: $frame)
-                } footer: {
-                    Text(frame ? "Vier Rahmenprofile, 1000 × 1000 mm, Vierkantrohr 40 × 40 × 2. Maße und Profil sind anschließend editierbar." : "Leeres Projekt ohne Zeichnung oder Bauteile.")
-                }
-                if let problem { Section { Text(problem).foregroundStyle(.red) } }
-                Section { Label("Nur auf diesem Gerät gespeichert", systemImage: "internaldrive").font(.footnote).foregroundStyle(.secondary) }
-            }
-            .navigationTitle("Neues Projekt").navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Abbrechen") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Anlegen") {
-                        do {
-                            try store.create(name: name, number: number, description: description, frame: frame)
-                            dismiss()
-                        } catch { problem = error.localizedDescription }
+            VStack(spacing: 18) {
+                Spacer(minLength: 14)
+                Image(systemName: "doc.viewfinder")
+                    .font(.system(size: 46, weight: .light))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 92, height: 92)
+                    .background(Theme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 26))
+                Text("Neues Projekt")
+                    .font(.title2.weight(.bold))
+                Text("Starte direkt mit einem Foto deiner Skizze. Name und Projektnummer vergeben wir automatisch.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 380)
+
+                VStack(spacing: 12) {
+                    Button(action: openCamera) {
+                        Label("Skizze fotografieren", systemImage: "camera.fill")
+                            .font(.headline).frame(maxWidth: .infinity, minHeight: 54)
                     }
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .accessibilityIdentifier("createProject")
+                    .buttonStyle(.glassProminent).tint(Theme.accent).foregroundStyle(.black)
+                    .accessibilityIdentifier("newProjectCamera")
+
+                    PhotosPicker(selection: $photoItem, matching: .images) {
+                        Label("Foto oder Skizze auswählen", systemImage: "photo.on.rectangle")
+                            .font(.headline).frame(maxWidth: .infinity, minHeight: 54)
+                    }
+                    .buttonStyle(.glass).tint(.white)
+                    .accessibilityIdentifier("newProjectPhoto")
+                    .disabled(isCreating)
+                }
+                .frame(maxWidth: 420)
+
+                if isCreating { ProgressView("Projekt wird vorbereitet …").padding(.top, 4) }
+                if let problem {
+                    Label(problem, systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote).foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 420)
+                }
+                Label("Lokal auf diesem Gerät · kein leeres Rahmenprojekt", systemImage: "internaldrive")
+                    .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
+                Spacer(minLength: 20)
+            }
+            .padding(.horizontal, 22)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.appBackground)
+            .navigationTitle("Projektstart").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Abbrechen") { dismiss() }
                 }
             }
+            .sheet(isPresented: $showCamera) {
+                CameraPicker(onImage: { data in beginProject(from: data, source: "camera", label: "Kamera") },
+                             onCancel: {})
+                    .ignoresSafeArea()
+            }
+            .navigationDestination(isPresented: $showReview) {
+                if let createdProject, let pendingPayload {
+                    SketchReviewView(project: createdProject, payload: pendingPayload) {
+                        didAdoptSketch = true
+                    }
+                }
+            }
+            .navigationDestination(isPresented: $showProject) {
+                if let createdProject { ProjectDetailView(project: createdProject) }
+            }
+            .onChange(of: photoItem) { _, item in
+                guard let item else { return }
+                Task {
+                    let data = try? await item.loadTransferable(type: Data.self)
+                    photoItem = nil
+                    if let data { beginProject(from: data, source: "photo", label: "Foto") }
+                    else { problem = "Das Foto konnte nicht geladen werden." }
+                }
+            }
+            .onChange(of: showReview) { _, isPresented in
+                guard !isPresented, let createdProject else { return }
+                if didAdoptSketch {
+                    showProject = true
+                } else {
+                    // Ein abgebrochener Scan soll kein leeres Projekt zurücklassen.
+                    try? store.delete(createdProject)
+                    self.createdProject = nil
+                    pendingPayload = nil
+                }
+            }
+            .alert("Projektstart nicht möglich", isPresented: Binding(
+                get: { problem != nil }, set: { if !$0 { problem = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: { Text(problem ?? "") }
+        }
+    }
+
+    private func openCamera() {
+        guard CameraPicker.isAvailable() else {
+            problem = "Die Kamera ist auf diesem Gerät nicht verfügbar."
+            return
+        }
+        showCamera = true
+    }
+
+    private func beginProject(from data: Data, source: String, label: String) {
+        guard !isCreating else { return }
+        guard let jpeg = SketchScanService.normalizedJPEG(from: data) else {
+            problem = "Das Bild konnte nicht gelesen werden."
+            return
+        }
+        isCreating = true
+        defer { isCreating = false }
+        do {
+            let name = "Skizze \(Date.now.formatted(date: .numeric, time: .shortened))"
+            let project = try store.create(name: name, number: "", description: "", frame: false)
+            createdProject = project
+            pendingPayload = SketchScanPayload(data: jpeg, source: source, sourceLabel: label)
+            didAdoptSketch = false
+            showReview = true
+        } catch {
+            problem = error.localizedDescription
         }
     }
 }

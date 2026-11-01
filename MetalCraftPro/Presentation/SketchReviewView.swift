@@ -24,6 +24,7 @@ struct SketchReviewView: View {
     let payload: SketchScanPayload
     /// Archivmodus: gespeicherte Skizze ohne Bearbeitung anzeigen.
     var storedSketch: MCSketch?
+    var onAdopt: (() -> Void)? = nil
 
     @Environment(LocalStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -218,6 +219,7 @@ struct SketchReviewView: View {
         do {
             adoptNote = try store.adoptSketch(project, source: payload.source, title: title,
                                               imageData: payload.data, result: result)
+            onAdopt?()
         } catch {
             problem = error.localizedDescription
         }
