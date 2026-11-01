@@ -10,6 +10,7 @@
 import Foundation
 import Vision
 import CoreGraphics
+import CoreImage
 import ImageIO
 import PDFKit
 import UniformTypeIdentifiers
@@ -66,6 +67,9 @@ enum SketchScanService {
             throw AnalysisError.unreadableImage
         }
         let width = Double(cgImage.width), height = Double(cgImage.height)
+        // Eine separate Graustufen-/Kontrastfassung hebt Bleistiftstriche und blasse
+        // Handschrift hervor. Das Original bleibt für Anzeige und Speicherung unangetastet.
+        let recognitionImage = enhancedForRecognition(cgImage) ?? cgImage
 
         let textRequest = VNRecognizeTextRequest()
         textRequest.recognitionLevel = .accurate
@@ -82,7 +86,7 @@ enum SketchScanService {
         let contourRequest = VNDetectContoursRequest()
         contourRequest.detectsDarkOnLight = true
 
-        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
+        let handler = VNImageRequestHandler(cgImage: recognitionImage, orientation: .up, options: [:])
         try handler.perform([textRequest, rectangleRequest, contourRequest])
 
         var elements: [RecognizedElement] = []
@@ -150,6 +154,24 @@ enum SketchScanService {
         for index in final.indices { final[index].name = names[final[index].id] ?? final[index].name }
         let limited = limit(final)
         return RecognitionResult(imageWidthPx: width, imageHeightPx: height, mmPerPixel: linked.mmPerPixel, elements: limited)
+    }
+
+    /// Sanfte lokale Scanverbesserung für Vision. Die Bildabmessungen bleiben gleich,
+    /// damit erkannte Bildkoordinaten weiterhin exakt auf dem Originalfoto liegen.
+    private static func enhancedForRecognition(_ image: CGImage) -> CGImage? {
+        let input = CIImage(cgImage: image)
+        guard let controls = CIFilter(name: "CIColorControls") else { return nil }
+        controls.setValue(input, forKey: kCIInputImageKey)
+        controls.setValue(0.0, forKey: kCIInputSaturationKey)
+        controls.setValue(1.22, forKey: kCIInputContrastKey)
+        controls.setValue(0.01, forKey: kCIInputBrightnessKey)
+        guard let contrasted = controls.outputImage,
+              let sharpen = CIFilter(name: "CISharpenLuminance") else { return nil }
+        sharpen.setValue(contrasted, forKey: kCIInputImageKey)
+        sharpen.setValue(0.25, forKey: kCIInputSharpnessKey)
+        guard let output = sharpen.outputImage else { return nil }
+        let context = CIContext(options: [.cacheIntermediates: false])
+        return context.createCGImage(output, from: input.extent)
     }
 
     private enum AnalysisError: LocalizedError {
