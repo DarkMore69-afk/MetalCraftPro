@@ -43,10 +43,18 @@ enum SketchScanService {
         let maxDimension = max(cgImage.width, cgImage.height)
         var scaled = image
         if maxDimension > 2600 {
-            let factor = 2600 / maxDimension
-            let newSize = CGSize(width: cgImage.width * factor, height: cgImage.height * factor)
+            // Use floating-point division: integer division would produce 0 for
+            // every image larger than 2600 px, creating a zero-sized renderer.
+            let factor = CGFloat(2600) / CGFloat(maxDimension)
+            let newSize = CGSize(
+                width: CGFloat(cgImage.width) * factor,
+                height: CGFloat(cgImage.height) * factor
+            )
+            guard newSize.width >= 1, newSize.height >= 1 else { return nil }
             let renderer = UIGraphicsImageRenderer(size: newSize)
-            scaled = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: newSize)) }
+            scaled = renderer.image { _ in
+                image.draw(in: CGRect(origin: .zero, size: newSize))
+            }
         }
         return scaled.jpegData(compressionQuality: 0.9)
     }
