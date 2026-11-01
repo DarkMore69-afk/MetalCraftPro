@@ -292,7 +292,7 @@ public enum SketchGeometryLinker {
 
         // 3. Maßstab aus den längsten Referenzen ableiten.
         var candidates: [(mmPerPixel: Double, pixelLength: Double, numberIndex: Int)] = []
-        for numberIndex in result.indices where result[numberIndex].assignedID != nil {
+        for numberIndex in result.indices where result[numberIndex].assignedID != nil && !result[numberIndex].needsReview {
             guard let shapeIndex = shapeIndices.first(where: { result[$0].id == result[numberIndex].assignedID }),
                   let value = result[numberIndex].valueMm, value > 0 else { continue }
             let pixel = pixelMeasure(of: result[shapeIndex], for: result[numberIndex],
