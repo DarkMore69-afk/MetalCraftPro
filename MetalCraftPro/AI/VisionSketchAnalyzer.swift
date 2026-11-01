@@ -105,10 +105,19 @@ enum SketchScanService {
                 var angle: Double?
                 if case .profile(let w, let h, let t) = parsed { profile = [w, h, t] }
                 if case .angleDeg(let value) = parsed { angle = value }
-                elements.append(RecognizedElement(kind: kind, rawText: raw,
-                                                  valueMm: DimensionTextParser.valueMm(of: parsed),
-                                                  profileDimensionsMm: profile, angleDeg: angle,
-                                                  anchor: anchor, confidence: confidence))
+                var recognized = RecognizedElement(kind: kind, rawText: raw,
+                                                     valueMm: DimensionTextParser.valueMm(of: parsed),
+                                                     profileDimensionsMm: profile, angleDeg: angle,
+                                                     anchor: anchor, confidence: confidence)
+                // OCR-Konfidenz beschreibt die Bildlesung, nicht die technische Plausibilität.
+                // Extrem lange Maße dürfen deshalb nicht ungeprüft übernommen oder als Maßstab
+                // für alle übrigen Elemente verwendet werden.
+                if recognized.kind == .length, let value = recognized.valueMm, value >= 12_000 {
+                    recognized.needsReview = true
+                    recognized.accepted = false
+                    recognized.reviewNote = "Ungewöhnlich großes Maß. Bitte mit der Skizze abgleichen."
+                }
+                elements.append(recognized)
             } else if raw.count <= 24 {
                 // Handschrift oder Beschriftung ohne Maßbezug – bleibt reiner Text.
                 elements.append(RecognizedElement(kind: .text, rawText: raw, anchor: anchor, confidence: confidence))
@@ -147,8 +156,11 @@ enum SketchScanService {
             }
         }
 
+        // Gleichmäßig wiederkehrende Linien des karierten Papiers aus der Geometrie entfernen.
+        let drawingElements = suppressRuledPaperLines(elements, imageWidthPx: width, imageHeightPx: height)
+
         // 4. Zuordnung Zahlen ↔ Geometrie, Maßstab, Namen.
-        let linked = SketchGeometryLinker.assign(elements, imageWidthPx: width, imageHeightPx: height)
+        let linked = SketchGeometryLinker.assign(drawingElements, imageWidthPx: width, imageHeightPx: height)
         let names = SketchGeometryLinker.names(for: linked.elements)
         var final = linked.elements
         for index in final.indices { final[index].name = names[final[index].id] ?? final[index].name }
@@ -163,12 +175,12 @@ enum SketchScanService {
         guard let controls = CIFilter(name: "CIColorControls") else { return nil }
         controls.setValue(input, forKey: kCIInputImageKey)
         controls.setValue(0.0, forKey: kCIInputSaturationKey)
-        controls.setValue(1.22, forKey: kCIInputContrastKey)
+        controls.setValue(1.10, forKey: kCIInputContrastKey)
         controls.setValue(0.01, forKey: kCIInputBrightnessKey)
         guard let contrasted = controls.outputImage,
               let sharpen = CIFilter(name: "CISharpenLuminance") else { return nil }
         sharpen.setValue(contrasted, forKey: kCIInputImageKey)
-        sharpen.setValue(0.25, forKey: kCIInputSharpnessKey)
+        sharpen.setValue(0.12, forKey: kCIInputSharpnessKey)
         guard let output = sharpen.outputImage else { return nil }
         let context = CIContext(options: [.cacheIntermediates: false])
         return context.createCGImage(output, from: input.extent)
@@ -277,6 +289,43 @@ enum SketchScanService {
             elements.append(RecognizedElement(kind: .line, shape: .segment(start: start, end: end),
                                               anchor: anchor, confidence: segment.confidence))
         }
+    }
+
+    /// Entfernt wiederkehrende, gleichmäßig beabstandete Linien von kariertem Papier.
+    /// Einzelne Profile/Stege bleiben erhalten; nur dichtes, über fast die ganze Seite
+    /// laufendes Raster wird als Hintergrund verworfen.
+    private static func suppressRuledPaperLines(_ elements: [RecognizedElement],
+                                                imageWidthPx: Double, imageHeightPx: Double) -> [RecognizedElement] {
+        var groups: [Int: [(index: Int, position: Double, extent: Double)]] = [0: [], 1: []]
+        for (index, element) in elements.enumerated() {
+            guard element.kind == .line,
+                  case .segment(let start, let end)? = element.shape else { continue }
+            let dx = abs(end.x - start.x), dy = abs(end.y - start.y)
+            if dx >= dy {
+                groups[0, default: []].append((index, (start.y + end.y) / 2, dx))
+            } else {
+                groups[1, default: []].append((index, (start.x + end.x) / 2, dy))
+            }
+        }
+        var ruledIndices = Set<Int>()
+        for group in groups.values where group.count >= 12 {
+            let ordered = group.sorted { $0.position < $1.position }
+            let gaps = zip(ordered, ordered.dropFirst()).map { $1.position - $0.position }
+            guard !gaps.isEmpty else { continue }
+            let medianGap = gaps.sorted()[gaps.count / 2]
+            guard (0.003...0.04).contains(medianGap) else { continue }
+            let regularGapIndices = gaps.indices.filter { abs(gaps[$0] - medianGap) <= medianGap * 0.28 }
+            let coverage = (ordered.last!.position - ordered.first!.position)
+            let meanExtent = ordered.reduce(0.0) { $0 + $1.extent } / Double(ordered.count)
+            // A real drawing may contain many parallel bars. A paper grid is much denser,
+            // evenly spaced, and spans nearly the entire page.
+            guard regularGapIndices.count >= 8, coverage >= 0.62, meanExtent >= 0.10 else { continue }
+            for gapIndex in regularGapIndices {
+                ruledIndices.insert(ordered[gapIndex].index)
+                ruledIndices.insert(ordered[gapIndex + 1].index)
+            }
+        }
+        return elements.enumerated().compactMap { ruledIndices.contains($0.offset) ? nil : $0.element }
     }
 
     /// Begrenzt die Elementliste auf die relevantesten Einträge, damit der Prüf-Screen
