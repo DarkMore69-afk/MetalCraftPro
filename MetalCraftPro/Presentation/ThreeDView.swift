@@ -38,6 +38,7 @@ final class ThreeDSession {
     private(set) var problem: String?
     private(set) var massKg: Double = 0
     private(set) var modelCenter = Vec3.zero
+    private(set) var modelMinY: Double = 0
     private(set) var modelExtent: Double = 1000
 
     var selectedPartID: UUID?
@@ -94,6 +95,7 @@ final class ThreeDSession {
                         }
                     }
                     self.modelCenter = Vec3(x: (low.x + high.x) / 2, y: (low.y + high.y) / 2, z: (low.z + high.z) / 2)
+                    self.modelMinY = low.y
                     self.modelExtent = max(400, max(high.x - low.x, max(high.y - low.y, high.z - low.z)))
                     self.builtParts = built
                     self.drilledHoles = drilling
@@ -520,7 +522,7 @@ final class Coordinator {
             fill.position = SCNVector3(Float(center.x - extent), Float(center.y + extent * 0.4), Float(center.z - extent * 0.8))
         }
         if let floor = scene.rootNode.childNode(withName: "floor", recursively: false) {
-            floor.position = SCNVector3(Float(center.x), Float(center.y - extent * 0.08), Float(center.z))
+            floor.position = SCNVector3(Float(center.x), Float(session.modelMinY - extent * 0.08), Float(center.z))
         }
     }
 
