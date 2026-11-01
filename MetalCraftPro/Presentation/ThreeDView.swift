@@ -94,9 +94,17 @@ final class ThreeDSession {
                             high = Vec3(x: max(high.x, box.max.x), y: max(high.y, box.max.y), z: max(high.z, box.max.z))
                         }
                     }
+                    guard !built.isEmpty, low.isFinite, high.isFinite else {
+                        self.builtParts = []
+                        self.drilledHoles = drilling
+                        self.modelRevision += 1
+                        self.isBuilding = false
+                        self.problem = "Keine darstellbaren 3D-Bauteile vorhanden. Bitte CAD-Bauteile und ihre Zuordnung prüfen."
+                        return
+                    }
                     self.modelCenter = Vec3(x: (low.x + high.x) / 2, y: (low.y + high.y) / 2, z: (low.z + high.z) / 2)
                     self.modelMinY = low.y
-                    self.modelExtent = max(400, max(high.x - low.x, max(high.y - low.y, high.z - low.z)))
+                    self.modelExtent = max(1, max(high.x - low.x, max(high.y - low.y, high.z - low.z)))
                     self.builtParts = built
                     self.drilledHoles = drilling
                     self.modelRevision += 1
@@ -378,9 +386,11 @@ private struct ThreeDSceneView: UIViewRepresentable {
         scene.background.contents = UIColor(white: 0.05, alpha: 1)
 
         let camera = SCNCamera()
-        camera.fieldOfView = 38
-        camera.zNear = 1
-        camera.zFar = 100_000
+        // Orthographic projection keeps technical views at a stable scale and prevents portrait cropping.
+        camera.usesOrthographicProjection = true
+        camera.orthographicScale = 1_000
+        camera.zNear = 0.1
+        camera.zFar = 1_000_000
         let cameraNode = SCNNode()
         cameraNode.name = "camera"
         cameraNode.camera = camera
@@ -447,7 +457,7 @@ final class Coordinator {
         }
         applySelectionAndExplode(in: scene)
         updateLightsAndFloor(in: scene)
-        updateCamera(in: scene, animated: session.consumeCameraAnimation())
+        updateCamera(in: scene, view: view, animated: session.consumeCameraAnimation())
     }
 
     private func rebuildContent(in scene: SCNScene) {
@@ -526,13 +536,17 @@ final class Coordinator {
         }
     }
 
-    private func updateCamera(in scene: SCNScene, animated: Bool) {
-        guard let cameraNode = scene.rootNode.childNode(withName: "camera", recursively: false) else { return }
+    private func updateCamera(in scene: SCNScene, view: SCNView, animated: Bool) {
+        guard let cameraNode = scene.rootNode.childNode(withName: "camera", recursively: false),
+              let camera = cameraNode.camera else { return }
         let target = session.modelCenter + session.panOffset
-        let distance = session.modelExtent * 2.1 * session.distanceFactor
         let yaw = session.yawDeg * .pi / 180
         let pitch = session.pitchDeg * .pi / 180
         let direction = Vec3(x: sin(yaw) * cos(pitch), y: sin(pitch), z: cos(yaw) * cos(pitch))
+        let aspect = max(0.35, Double(view.bounds.width / max(1, view.bounds.height)))
+        let fitScale = session.modelExtent * max(1, 1 / aspect) * 1.25
+        camera.orthographicScale = max(1, fitScale * session.distanceFactor)
+        let distance = max(1_000, session.modelExtent * 3.0)
         let position = target + direction * distance
         let up: SCNVector3 = session.pitchDeg > 80 ? SCNVector3(0, 0, -1) : SCNVector3(0, 1, 0)
         SCNTransaction.begin()
