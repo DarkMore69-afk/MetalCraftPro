@@ -102,7 +102,7 @@ final class LocalStore {
         do { try save() } catch { notice = error.localizedDescription }
     }
 
-    func create(name: String, number: String, description: String, frame: Bool) throws {
+    @discardableResult func create(name: String, number: String, description: String, frame: Bool) throws -> MCProject {
         let context = try context
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw StoreError.invalidName }
@@ -121,6 +121,7 @@ final class LocalStore {
         if frame { DemoData.populateFrame(project) }
         else { project.revisions.append(MCRevision(label: "A", note: "Projekt angelegt")) }
         try save()
+        return project
     }
 
     func rename(_ project: MCProject, to value: String) throws {
