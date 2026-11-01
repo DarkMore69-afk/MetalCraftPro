@@ -44,8 +44,6 @@ enum SketchScanService {
         let maxDimension = max(cgImage.width, cgImage.height)
         var scaled = image
         if maxDimension > 2600 {
-            // Use floating-point division: integer division would produce 0 for
-            // every image larger than 2600 px, creating a zero-sized renderer.
             let factor = CGFloat(2600) / CGFloat(maxDimension)
             let newSize = CGSize(
                 width: CGFloat(cgImage.width) * factor,
@@ -67,8 +65,6 @@ enum SketchScanService {
             throw AnalysisError.unreadableImage
         }
         let width = Double(cgImage.width), height = Double(cgImage.height)
-        // Eine separate Graustufen-/Kontrastfassung hebt Bleistiftstriche und blasse
-        // Handschrift hervor. Das Original bleibt für Anzeige und Speicherung unangetastet.
         let recognitionImage = enhancedForRecognition(cgImage) ?? cgImage
 
         let textRequest = VNRecognizeTextRequest()
@@ -77,11 +73,11 @@ enum SketchScanService {
         textRequest.recognitionLanguages = ["de-DE", "en-US"]
 
         let rectangleRequest = VNDetectRectanglesRequest()
-        rectangleRequest.minimumConfidence = 0.4
-        rectangleRequest.minimumAspectRatio = 0.2
+        rectangleRequest.minimumConfidence = 0.45
+        rectangleRequest.minimumAspectRatio = 0.15
         rectangleRequest.maximumAspectRatio = 1.0
-        rectangleRequest.minimumSize = 0.1
-        rectangleRequest.quadratureTolerance = 25
+        rectangleRequest.minimumSize = 0.08
+        rectangleRequest.quadratureTolerance = 20
 
         let contourRequest = VNDetectContoursRequest()
         contourRequest.detectsDarkOnLight = true
@@ -93,7 +89,7 @@ enum SketchScanService {
 
         // 1. Text: Maßzahlen, Profilangaben, Winkel, Beschriftungen.
         let textObservations = textRequest.results ?? []
-        for observation in textObservations.prefix(80) {
+        for observation in textObservations.prefix(100) {
             guard let candidate = observation.topCandidates(1).first else { continue }
             let raw = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !raw.isEmpty else { continue }
@@ -109,24 +105,21 @@ enum SketchScanService {
                                                      valueMm: DimensionTextParser.valueMm(of: parsed),
                                                      profileDimensionsMm: profile, angleDeg: angle,
                                                      anchor: anchor, confidence: confidence)
-                // OCR-Konfidenz beschreibt die Bildlesung, nicht die technische Plausibilität.
-                // Extrem lange Maße dürfen deshalb nicht ungeprüft übernommen oder als Maßstab
-                // für alle übrigen Elemente verwendet werden.
-                if recognized.kind == .length, let value = recognized.valueMm, value >= 12_000 {
+                // Strengere Plausibilität: typische Metallbau-Skizzen selten > 8 m
+                if recognized.kind == .length, let value = recognized.valueMm, value >= 8000 || value < 10 {
                     recognized.needsReview = true
                     recognized.accepted = false
-                    recognized.reviewNote = "Ungewöhnlich großes Maß. Bitte mit der Skizze abgleichen."
+                    recognized.reviewNote = "Unplausibles Maß. Bitte mit der Skizze abgleichen oder manuell korrigieren."
                 }
                 elements.append(recognized)
-            } else if raw.count <= 24 {
-                // Handschrift oder Beschriftung ohne Maßbezug – bleibt reiner Text.
+            } else if raw.count <= 28 {
                 elements.append(RecognizedElement(kind: .text, rawText: raw, anchor: anchor, confidence: confidence))
             }
         }
 
-        // 2. Rechtecke aus dem spezialisierten Detector.
-        let rectangles = (rectangleRequest.results ?? []).prefix(4)
-        for observation in rectangles.prefix(4) {
+        // 2. Rechtecke
+        let rectangles = (rectangleRequest.results ?? []).prefix(6)
+        for observation in rectangles {
             let origin = RecognizedPoint(x: observation.boundingBox.origin.x,
                                          y: 1 - observation.boundingBox.maxY)
             let size = RecognizedSize(width: observation.boundingBox.width, height: observation.boundingBox.height)
@@ -137,11 +130,11 @@ enum SketchScanService {
                                               confidence: Double(observation.confidence)))
         }
 
-        // 3. Konturen → Segmente, Kreise, (falls nötig) Rechtecke.
+        // 3. Konturen → Segmente, Kreise, Rechtecke
         let contourObservations = contourRequest.results ?? []
         let hadDetectorRectangle = elements.contains { $0.kind == .rectangle }
         for observation in contourObservations {
-            let count = min(observation.contourCount, 200)
+            let count = min(observation.contourCount, 180)
             var contours: [(points: [RecognizedPoint], area: Double)] = []
             for index in 0 ..< count {
                 guard let contour = try? observation.contour(at: index) else { continue }
@@ -149,14 +142,14 @@ enum SketchScanService {
                 guard points.count >= 3 else { continue }
                 contours.append((points, polygonArea(points)))
             }
-            let largest = contours.sorted { $0.area > $1.area }.prefix(40)
+            let largest = contours.sorted { $0.area > $1.area }.prefix(35)
             for contour in largest {
                 appendShapes(from: contour.points, width: width, height: height,
                              into: &elements, allowRectangle: !hadDetectorRectangle)
             }
         }
 
-        // Gleichmäßig wiederkehrende Linien des karierten Papiers aus der Geometrie entfernen.
+        // Stärkere Raster-Unterdrückung
         let drawingElements = suppressRuledPaperLines(elements, imageWidthPx: width, imageHeightPx: height)
 
         // 4. Zuordnung Zahlen ↔ Geometrie, Maßstab, Namen.
@@ -168,19 +161,17 @@ enum SketchScanService {
         return RecognitionResult(imageWidthPx: width, imageHeightPx: height, mmPerPixel: linked.mmPerPixel, elements: limited)
     }
 
-    /// Sanfte lokale Scanverbesserung für Vision. Die Bildabmessungen bleiben gleich,
-    /// damit erkannte Bildkoordinaten weiterhin exakt auf dem Originalfoto liegen.
     private static func enhancedForRecognition(_ image: CGImage) -> CGImage? {
         let input = CIImage(cgImage: image)
         guard let controls = CIFilter(name: "CIColorControls") else { return nil }
         controls.setValue(input, forKey: kCIInputImageKey)
         controls.setValue(0.0, forKey: kCIInputSaturationKey)
-        controls.setValue(1.10, forKey: kCIInputContrastKey)
-        controls.setValue(0.01, forKey: kCIInputBrightnessKey)
+        controls.setValue(1.15, forKey: kCIInputContrastKey)
+        controls.setValue(0.02, forKey: kCIInputBrightnessKey)
         guard let contrasted = controls.outputImage,
               let sharpen = CIFilter(name: "CISharpenLuminance") else { return nil }
         sharpen.setValue(contrasted, forKey: kCIInputImageKey)
-        sharpen.setValue(0.12, forKey: kCIInputSharpnessKey)
+        sharpen.setValue(0.18, forKey: kCIInputSharpnessKey)
         guard let output = sharpen.outputImage else { return nil }
         let context = CIContext(options: [.cacheIntermediates: false])
         return context.createCGImage(output, from: input.extent)
@@ -197,7 +188,7 @@ enum SketchScanService {
     }
 
     private static func isValid(size: RecognizedSize) -> Bool {
-        size.width.isFinite && size.height.isFinite && size.width > 0.02 && size.height > 0.02
+        size.width.isFinite && size.height.isFinite && size.width > 0.015 && size.height > 0.015
     }
 
     private static func anchorPoint(_ box: CGRect, height: Double) -> RecognizedPoint {
@@ -244,7 +235,7 @@ enum SketchScanService {
     private static func appendShapes(from points: [RecognizedPoint], width: Double, height: Double,
                                      into elements: inout [RecognizedElement], allowRectangle: Bool) {
         let maxDimension = max(width, height)
-        let tolerance = 0.006 * maxDimension
+        let tolerance = 0.005 * maxDimension
         let simplified = PolylineAnalysis.simplify(points, tolerance: tolerance)
         guard simplified.count >= 2 else { return }
         let closed = hypot(simplified[0].x - simplified.last!.x, simplified[0].y - simplified.last!.y) * maxDimension < tolerance * 2
@@ -261,7 +252,7 @@ enum SketchScanService {
             let circularity = perimeter > 0 ? 4 * .pi * area / (perimeter * perimeter) : 0
             let centroid = RecognizedPoint(x: xs.reduce(0, +) / Double(polygon.count),
                                            y: ys.reduce(0, +) / Double(polygon.count))
-            if circularity > 0.82, boxWidth > 0.015 * maxDimension {
+            if circularity > 0.80, boxWidth > 0.012 * maxDimension {
                 let radius = polygon.reduce(0.0) {
                     $0 + hypot(($1.x - centroid.x) * width, ($1.y - centroid.y) * height)
                 } / Double(polygon.count)
@@ -271,18 +262,18 @@ enum SketchScanService {
                                                   anchor: centroid, confidence: confidence))
                 return
             }
-            if allowRectangle, polygon.count <= 12, boxWidth > 0.1 * maxDimension, boxHeight > 0.1 * maxDimension {
+            if allowRectangle, polygon.count <= 14, boxWidth > 0.08 * maxDimension, boxHeight > 0.08 * maxDimension {
                 let origin = RecognizedPoint(x: xs.min()!, y: ys.min()!)
                 let size = RecognizedSize(width: boxWidth / width, height: boxHeight / height)
                 elements.append(RecognizedElement(kind: .rectangle,
                                                   shape: .rectangle(origin: origin, width: size.width, height: size.height),
-                                                  anchor: center(of: origin, size: size), confidence: 0.85))
+                                                  anchor: center(of: origin, size: size), confidence: 0.82))
                 return
             }
         }
 
-        let minLength = 0.045 * maxDimension
-        for segment in PolylineAnalysis.segments(from: polygon, minLength: minLength, maxCount: 24) {
+        let minLength = 0.038 * maxDimension
+        for segment in PolylineAnalysis.segments(from: polygon, minLength: minLength, maxCount: 20) {
             let start = RecognizedPoint(x: segment.x1 / width, y: segment.y1 / height)
             let end = RecognizedPoint(x: segment.x2 / width, y: segment.y2 / height)
             let anchor = RecognizedPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
@@ -292,8 +283,6 @@ enum SketchScanService {
     }
 
     /// Entfernt wiederkehrende, gleichmäßig beabstandete Linien von kariertem Papier.
-    /// Einzelne Profile/Stege bleiben erhalten; nur dichtes, über fast die ganze Seite
-    /// laufendes Raster wird als Hintergrund verworfen.
     private static func suppressRuledPaperLines(_ elements: [RecognizedElement],
                                                 imageWidthPx: Double, imageHeightPx: Double) -> [RecognizedElement] {
         var groups: [Int: [(index: Int, position: Double, extent: Double)]] = [0: [], 1: []]
@@ -308,18 +297,16 @@ enum SketchScanService {
             }
         }
         var ruledIndices = Set<Int>()
-        for group in groups.values where group.count >= 12 {
+        for group in groups.values where group.count >= 8 {
             let ordered = group.sorted { $0.position < $1.position }
             let gaps = zip(ordered, ordered.dropFirst()).map { $1.position - $0.position }
             guard !gaps.isEmpty else { continue }
             let medianGap = gaps.sorted()[gaps.count / 2]
-            guard (0.003...0.04).contains(medianGap) else { continue }
-            let regularGapIndices = gaps.indices.filter { abs(gaps[$0] - medianGap) <= medianGap * 0.28 }
+            guard (0.002...0.05).contains(medianGap) else { continue }
+            let regularGapIndices = gaps.indices.filter { abs(gaps[$0] - medianGap) <= medianGap * 0.35 }
             let coverage = (ordered.last!.position - ordered.first!.position)
             let meanExtent = ordered.reduce(0.0) { $0 + $1.extent } / Double(ordered.count)
-            // A real drawing may contain many parallel bars. A paper grid is much denser,
-            // evenly spaced, and spans nearly the entire page.
-            guard regularGapIndices.count >= 8, coverage >= 0.62, meanExtent >= 0.10 else { continue }
+            guard regularGapIndices.count >= 5, coverage >= 0.55, meanExtent >= 0.08 else { continue }
             for gapIndex in regularGapIndices {
                 ruledIndices.insert(ordered[gapIndex].index)
                 ruledIndices.insert(ordered[gapIndex + 1].index)
@@ -328,16 +315,14 @@ enum SketchScanService {
         return elements.enumerated().compactMap { ruledIndices.contains($0.offset) ? nil : $0.element }
     }
 
-    /// Begrenzt die Elementliste auf die relevantesten Einträge, damit der Prüf-Screen
-    /// übersichtlich bleibt (längste Linien, größte Formen zuerst).
+    /// Begrenzt die Elementliste – bevorzugt Elemente mit Maß.
     private static func limit(_ elements: [RecognizedElement]) -> [RecognizedElement] {
         let shapes = elements.filter { $0.shape != nil }
         let texts = elements.filter { $0.shape == nil }
-        let shapeBudget = 40
+        let shapeBudget = 32
         let ranked = shapes.enumerated().sorted { score($0.element) > score($1.element) }
         let keptShapes = ranked.prefix(shapeBudget).map(\.element)
         let keptIDs = Set(keptShapes.map(\.id))
-        // Zahlen, die einer verworfenen Form zugeordnet waren, bleiben eigenständig erhalten.
         let keptTexts = texts.filter { element in
             guard let assigned = element.assignedID else { return true }
             return keptIDs.contains(assigned)
@@ -346,15 +331,20 @@ enum SketchScanService {
     }
 
     private static func score(_ element: RecognizedElement) -> Double {
+        var base: Double = 0
         switch element.shape {
         case .segment(let start, let end):
-            return hypot(end.x - start.x, end.y - start.y)
+            base = hypot(end.x - start.x, end.y - start.y)
         case .rectangle(_, let width, let height):
-            return width * height
+            base = width * height
         case .circle(_, let radius):
-            return radius * radius * .pi
+            base = radius * radius * .pi
         case nil:
-            return 0
+            base = 0
         }
+        // Bonus für Elemente mit zugeordnetem Maß
+        if element.valueMm != nil { base *= 2.2 }
+        if element.isUncertain { base *= 0.6 }
+        return base
     }
 }
