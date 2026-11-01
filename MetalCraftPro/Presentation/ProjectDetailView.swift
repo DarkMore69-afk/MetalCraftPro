@@ -12,6 +12,7 @@ struct ProjectDetailView: View {
     @State private var showDelete = false
     @State private var showThreeD = false
     @State private var showCutList = false
+    @State private var showPressBrake = false
     @State private var showMontage = false
     @State private var showWelding = false
     @State private var showAssistant = false
@@ -27,6 +28,12 @@ struct ProjectDetailView: View {
                 parameterCard
                 validationEntry
                 sectionGrid
+                Button { showPressBrake = true } label: {
+                    Label("Kantbank · Blechzuschnitt", systemImage: "angle")
+                        .font(.headline).frame(maxWidth: .infinity, minHeight: 48)
+                }
+                .buttonStyle(.glassProminent).tint(Theme.accent).foregroundStyle(.black)
+                .accessibilityIdentifier("openPressBrake")
                 if !project.drawings.isEmpty || !project.parts.isEmpty {
                     HStack(spacing: 10) {
                         if !project.drawings.isEmpty {
@@ -106,6 +113,7 @@ struct ProjectDetailView: View {
         .toolbar(.hidden, for: .navigationBar)
         .fullScreenCover(isPresented: $showThreeD) { ThreeDView(project: project) }
         .fullScreenCover(isPresented: $showCutList) { CutListView(project: project) }
+        .fullScreenCover(isPresented: $showPressBrake) { PressBrakeView(project: project) }
         .fullScreenCover(isPresented: $showMontage) { MontageView(project: project) }
         .fullScreenCover(isPresented: $showWelding) { WeldingView(project: project) }
         .fullScreenCover(isPresented: $showAssistant) { AssistantView(project: project) }
