@@ -35,7 +35,10 @@ struct RootView: View {
             if tab != .projekte { InDevelopmentView(title: tab.title, icon: tab.icon) }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            CustomTabBar(selection: $tab).padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 6)
+            CustomTabBar(selection: $tab)
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 6)
         }
         .alert("Lokale Speicherung", isPresented: Binding(get: { store.notice != nil }, set: { if !$0 { store.notice = nil } })) {
             Button("Verstanden") { store.notice = nil }
@@ -43,8 +46,6 @@ struct RootView: View {
     }
 }
 
-/// Native SwiftUI buttons and system Liquid Glass. A six-item dock mirrors the supplied
-/// composition without hiding workshop destinations in a More menu.
 struct CustomTabBar: View {
     @Binding var selection: AppTab
     @Environment(\.dynamicTypeSize) private var dynamicType
@@ -82,12 +83,11 @@ struct InDevelopmentView: View {
         ContentUnavailableView {
             Label(title, systemImage: icon)
         } description: {
-            Text("In Entwicklung\nDie lokale Projektbasis ist bereits nutzbar. Dieser Bereich folgt in einem späteren Modul.")
+            Text("In Entwicklung\nDie Projektliste und lokale Speicherung sind bereits nutzbar. Dieser Bereich folgt in einem späteren Modul.")
         }
     }
 }
 
-/// Preview is rendered from the canonical frame, not an unrelated decorative gate image.
 struct FrameThumbnail: View {
     let frame: FrameParameters?
     var body: some View {
