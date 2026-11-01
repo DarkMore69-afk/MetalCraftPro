@@ -490,7 +490,8 @@ final class Coordinator {
             boreNode.position = SCNVector3(Float(drilled.center.x), Float(drilled.center.y), Float(drilled.center.z + 0.01))
             owner.addChildNode(boreNode)
         }
-        root.position = vec(session.modelCenter * -1)
+        // Mesh vertices already use project coordinates; keep the root aligned with camera and lights.
+        root.position = SCNVector3Zero
     }
 
     private func applySelectionAndExplode(in scene: SCNScene) {
