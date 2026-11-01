@@ -35,6 +35,7 @@ struct SketchReviewView: View {
     @State private var problem: String?
     @State private var adoptNote: String?
     @State private var isAdopting = false
+    @State private var showOnlyWithMeasure = false
 
     enum Phase: Equatable { case analyzing, review, failed(String) }
 
@@ -62,11 +63,11 @@ struct SketchReviewView: View {
         .toolbar(.hidden, for: .navigationBar)
         .task { await analyze() }
         .alert("Maß korrigieren", isPresented: Binding(get: { editingElement != nil }, set: { if !$0 { editingElement = nil } })) {
-            TextField(editingElement?.name ?? "Wert", text: $editText).keyboardType(.decimalPad)
+            TextField(editingElement?.name ?? "Wert in mm", text: $editText).keyboardType(.decimalPad)
             Button("Übernehmen") { commitEdit() }
             Button("Abbrechen", role: .cancel) { editingElement = nil }
         } message: {
-            Text("Wert in mm eingeben. Die Geometrie wird erst nach erneuter Prüfung übernommen.")
+            Text("Länge oder Maß in mm eingeben (z. B. 1200, 40x40x2, Ø10). Unrealistische Werte werden markiert.")
         }
         .alert("Nicht gespeichert", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })) {
             Button("OK", role: .cancel) {}
@@ -83,6 +84,20 @@ struct SketchReviewView: View {
             }.buttonStyle(.glass).buttonBorderShape(.circle).tint(.white).accessibilityLabel("Zurück")
             Text("Skizze prüfen").font(.title2.weight(.bold)).accessibilityAddTraits(.isHeader)
             Spacer()
+            if storedSketch == nil {
+                Menu {
+                    Button("Nur Elemente mit Maß anzeigen", systemImage: showOnlyWithMeasure ? "checkmark" : "") {
+                        showOnlyWithMeasure.toggle()
+                    }
+                    Button("Nur mit Maß übernehmen", systemImage: "checkmark.circle") { selectOnlyWithMeasure() }
+                    Button("Unsichere abwählen", systemImage: "exclamationmark.triangle") { deselectUncertain() }
+                    Button("Alle anwählen", systemImage: "checkmark.circle.fill") { setAllAccepted(true) }
+                    Button("Alle abwählen", systemImage: "circle") { setAllAccepted(false) }
+                } label: {
+                    Image(systemName: "ellipsis.circle").frame(width: 32, height: 32)
+                }
+                .buttonStyle(.glass).tint(.white)
+            }
         }
         .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 6)
     }
@@ -112,18 +127,32 @@ struct SketchReviewView: View {
             .accessibilityLabel("Skizzenfoto mit erkannten Elementen")
     }
 
+    private var filteredElements: [(offset: Int, element: RecognizedElement)] {
+        guard let result else { return [] }
+        return result.elements.enumerated().compactMap { index, element in
+            if showOnlyWithMeasure && element.valueMm == nil && element.kind != .profile && element.kind != .angle {
+                return nil
+            }
+            return (index, element)
+        }
+    }
+
     private var elementList: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Erkannte Elemente").font(.title3.weight(.semibold)).accessibilityAddTraits(.isHeader)
-            ForEach(Array(result!.elements.enumerated()), id: \.element.id) { index, element in
-                ElementRowView(element: element,
-                               subtitle: subtitle(for: element),
-                               showControls: storedSketch == nil,
-                               onToggle: { toggle(index) },
-                               onEdit: { beginEdit(element) })
+            HStack {
+                Text("Erkannte Elemente").font(.title3.weight(.semibold)).accessibilityAddTraits(.isHeader)
+                Spacer()
+                Text("\(acceptCount) ausgewählt").font(.caption).foregroundStyle(.secondary)
             }
-            if result!.elements.isEmpty {
-                Label("Keine verwertbaren Elemente erkannt. Bitte das Foto mit besserem Licht und aufrechter Kamera wiederholen.",
+            ForEach(filteredElements, id: \.element.id) { item in
+                ElementRowView(element: item.element,
+                               subtitle: subtitle(for: item.element),
+                               showControls: storedSketch == nil,
+                               onToggle: { toggle(item.offset) },
+                               onEdit: { beginEdit(item.element) })
+            }
+            if filteredElements.isEmpty {
+                Label("Keine Elemente in der aktuellen Ansicht. Filter anpassen oder neu scannen.",
                       systemImage: "questionmark.square.dashed").font(.subheadline).foregroundStyle(.secondary)
                     .padding(14).frame(maxWidth: .infinity, alignment: .leading).background(Theme.card())
             }
@@ -131,7 +160,7 @@ struct SketchReviewView: View {
     }
 
     private var uncertaintyBanner: some View {
-        let uncertain = result!.elements.filter { $0.accepted && $0.isUncertain }.count
+        let uncertain = result?.elements.filter { $0.accepted && $0.isUncertain }.count ?? 0
         return Group {
             if uncertain > 0 {
                 HStack(alignment: .top, spacing: 12) {
@@ -139,7 +168,7 @@ struct SketchReviewView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(uncertain == 1 ? "1 Wert ist unsicher" : "\(uncertain) Werte sind unsicher")
                             .font(.subheadline.weight(.semibold))
-                        Text("Fehlende Maße werden nicht ergänzt. Bitte jeden unsicheren Wert prüfen oder abwählen.")
+                        Text("Unrealistische oder nicht zugeordnete Maße bitte prüfen oder abwählen. Tipp: Menü oben rechts für Bulk-Aktionen.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -180,9 +209,8 @@ struct SketchReviewView: View {
     }
 
     private func beginEdit(_ element: RecognizedElement) {
-        guard storedSketch == nil, element.kind != .text, element.kind != .line,
-              element.kind != .rectangle, element.kind != .circle else { return }
-        editText = element.rawText ?? ""
+        guard storedSketch == nil, element.kind != .text else { return }
+        editText = element.rawText ?? (element.valueMm.map { String(format: "%.0f", $0) } ?? "")
         editingElement = element
     }
 
@@ -211,6 +239,31 @@ struct SketchReviewView: View {
                                    mmPerPixel: relinked.mmPerPixel, elements: elements)
     }
 
+    private func selectOnlyWithMeasure() {
+        guard var updated = result else { return }
+        for i in updated.elements.indices {
+            let el = updated.elements[i]
+            updated.elements[i].accepted = (el.valueMm != nil || el.profileDimensionsMm != nil || el.angleDeg != nil) && !el.isUncertain
+        }
+        result = updated
+    }
+
+    private func deselectUncertain() {
+        guard var updated = result else { return }
+        for i in updated.elements.indices where updated.elements[i].isUncertain {
+            updated.elements[i].accepted = false
+        }
+        result = updated
+    }
+
+    private func setAllAccepted(_ value: Bool) {
+        guard var updated = result else { return }
+        for i in updated.elements.indices {
+            updated.elements[i].accepted = value
+        }
+        result = updated
+    }
+
     private func adopt() {
         guard let result else { return }
         isAdopting = true
@@ -233,7 +286,18 @@ struct SketchReviewView: View {
         }
         image = UIImage(data: payload.data)
         do {
-            let analyzed = try await SketchScanService.analyze(imageData: payload.data)
+            var analyzed = try await SketchScanService.analyze(imageData: payload.data)
+            // Nach der Analyse: unrealistische Maße und Elemente ohne Zuordnung standardmäßig abwählen
+            for i in analyzed.elements.indices {
+                let el = analyzed.elements[i]
+                if let v = el.valueMm, v > 8000 || v < 5 {
+                    analyzed.elements[i].accepted = false
+                    analyzed.elements[i].needsReview = true
+                    analyzed.elements[i].reviewNote = "Unplausibles Maß – bitte prüfen oder manuell korrigieren."
+                } else if el.valueMm == nil && el.kind == .line {
+                    analyzed.elements[i].accepted = false
+                }
+            }
             result = analyzed
             phase = .review
         } catch {
@@ -247,13 +311,13 @@ struct SketchReviewView: View {
         switch element.kind {
         case .line:
             if let value = element.valueMm { return "Länge \(DeFormat.number(value)) mm · \(confidence)" }
-            return "\(confidence) · kein Maß zugeordnet"
+            return "\(confidence) · kein Maß – tippen zum Setzen"
         case .rectangle:
             if let value = element.valueMm { return "Kante \(DeFormat.number(value)) mm · \(confidence)" }
             return "\(confidence) · kein Maß zugeordnet"
         case .circle:
             if let value = element.valueMm { return "Bohrung Ø\(DeFormat.number(value)) · \(confidence)" }
-            return "\(confidence) · kein Durchmesser erkannt"
+            return "\(confidence) · kein Durchmesser"
         case .length, .diameter, .angle, .profile, .text:
             return confidence
         }
@@ -277,18 +341,18 @@ struct ElementRowView: View {
                 Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
             }
             Spacer(minLength: 8)
-            if showControls && element.isUncertain {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.accent)
-                    Text("Bitte prüfen").font(.subheadline).foregroundStyle(Theme.accent)
-                    Button(action: onEdit) {
-                        Image(systemName: "pencil").foregroundStyle(.secondary)
-                    }.accessibilityLabel("Wert korrigieren")
+            if showControls {
+                if element.isUncertain {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.accent)
+                        Button(action: onEdit) {
+                            Image(systemName: "pencil").foregroundStyle(.secondary)
+                        }.accessibilityLabel("Wert korrigieren")
+                    }
                 }
-            } else if element.accepted {
-                Image(systemName: "checkmark.circle.fill").font(.title3).foregroundStyle(.green)
-            } else if showControls {
-                Image(systemName: "circle").font(.title3).foregroundStyle(Color(white: 0.45))
+                Image(systemName: element.accepted ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(element.accepted ? .green : Color(white: 0.45))
             }
         }
         .padding(12)
@@ -296,8 +360,9 @@ struct ElementRowView: View {
         .background(Theme.card(cornerRadius: 16))
         .contentShape(Rectangle())
         .onTapGesture(perform: showControls ? onToggle : {})
+        .onLongPressGesture { if showControls { onEdit() } }
         .accessibilityElement(children: .combine)
-        .accessibilityHint(showControls ? "Tippen zum Übernehmen oder Verwerfen" : "")
+        .accessibilityHint(showControls ? "Tippen zum An-/Abwählen, lange drücken zum Bearbeiten" : "")
     }
 
     @ViewBuilder private var icon: some View {
@@ -405,70 +470,18 @@ struct SketchOverlayView: View {
             context.stroke(Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2)), with: .color(color), lineWidth: width)
         }
         // Maßlinie mit erkanntem mm-Wert an Linien.
-        if !dimmed, element.kind == .line, case .segment(let start, let end)? = element.shape, let value = element.valueMm {
-            drawDimension(from: start, to: end, value: value, context: &context, size: size)
+        if !dimmed, element.kind == .line, let value = element.valueMm, case .segment(let start, let end) = element.shape {
+            let mid = point(RecognizedPoint(x: (start.x + end.x)/2, y: (start.y + end.y)/2), size)
+            let text = Text("\(Int(value.rounded()))").font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.accent)
+            context.draw(text, at: CGPoint(x: mid.x, y: mid.y - 10))
         }
-    }
-
-    private func drawDimension(from start: RecognizedPoint, to end: RecognizedPoint, value: Double, context: inout GraphicsContext, size: CGSize) {
-        let p1 = point(start, size), p2 = point(end, size)
-        let horizontal = abs(p2.y - p1.y) <= abs(p2.x - p1.x)
-        let offset: CGFloat = 20
-        let line: Path
-        let labelPoint: CGPoint
-        if horizontal {
-            let y = min(p1.y, p2.y) - offset
-            line = Path { path in
-                path.move(to: CGPoint(x: p1.x, y: y)); path.addLine(to: CGPoint(x: p2.x, y: y))
-                path.move(to: CGPoint(x: p1.x, y: y - 5)); path.addLine(to: CGPoint(x: p1.x, y: y + 5))
-                path.move(to: CGPoint(x: p2.x, y: y - 5)); path.addLine(to: CGPoint(x: p2.x, y: y + 5))
-            }
-            labelPoint = CGPoint(x: (p1.x + p2.x) / 2, y: y - 11)
-        } else {
-            let x = min(p1.x, p2.x) - offset
-            line = Path { path in
-                path.move(to: CGPoint(x: x, y: p1.y)); path.addLine(to: CGPoint(x: x, y: p2.y))
-                path.move(to: CGPoint(x: x - 5, y: p1.y)); path.addLine(to: CGPoint(x: x + 5, y: p1.y))
-                path.move(to: CGPoint(x: x - 5, y: p2.y)); path.addLine(to: CGPoint(x: x + 5, y: p2.y))
-            }
-            labelPoint = CGPoint(x: x - 4, y: (p1.y + p2.y) / 2)
-        }
-        context.stroke(line, with: .color(Theme.accent), lineWidth: 1.4)
-        let text = context.resolve(Text(DeFormat.number(value, maxFractionDigits: 0))
-            .font(.system(size: 15, weight: .semibold)).foregroundColor(Theme.accent))
-        context.draw(text, at: labelPoint, anchor: horizontal ? .center : .trailing)
     }
 
     private func drawLabel(_ element: RecognizedElement, context: inout GraphicsContext, size: CGSize) {
-        let anchor = point(element.anchor, size)
-        let text: String
-        switch element.kind {
-        case .length: text = "\(DeFormat.number(element.valueMm ?? 0, maxFractionDigits: 0))"
-        case .diameter: text = "Ø\(DeFormat.number(element.valueMm ?? 0, maxFractionDigits: 0))"
-        case .angle: text = "\(DeFormat.number(element.angleDeg ?? 0, maxFractionDigits: 0))°"
-        case .profile:
-            text = (element.profileDimensionsMm ?? []).map { DeFormat.number($0, maxFractionDigits: 0) }.joined(separator: "x")
-        default: text = element.rawText ?? ""
-        }
-        guard !text.isEmpty else { return }
-        context.fill(Path(ellipseIn: CGRect(x: anchor.x - 3, y: anchor.y - 3, width: 6, height: 6)), with: .color(Theme.accent))
-        let resolved = context.resolve(Text(text).font(.system(size: 14, weight: .semibold)).foregroundColor(Theme.accent))
-        context.draw(resolved, at: CGPoint(x: anchor.x + 34, y: anchor.y + 14), anchor: .leading)
-        var leader = Path()
-        leader.move(to: anchor)
-        leader.addLine(to: CGPoint(x: anchor.x + 30, y: anchor.y + 12))
-        context.stroke(leader, with: .color(Theme.accent), lineWidth: 1.2)
-    }
-}
-
-// MARK: - Archivansicht
-
-/// Gespeicherte Skizze: Foto mit übernommener Erkennung, ohne Bearbeitung.
-struct SketchArchiveView: View {
-    let sketch: MCSketch
-    var body: some View {
-        SketchReviewView(project: sketch.project ?? MCProject(name: "–", number: "–"),
-                         payload: SketchScanPayload(data: Data(), source: sketch.source, sourceLabel: sketch.sourceLabel),
-                         storedSketch: sketch)
+        // Einfache Label-Positionierung für reine Zahlen/Profile
+        let pos = point(element.anchor, size)
+        let label = element.rawText ?? "?"
+        let text = Text(label).font(.system(size: 10)).foregroundColor(Theme.accent)
+        context.draw(text, at: CGPoint(x: pos.x, y: pos.y - 8))
     }
 }
